@@ -18,7 +18,7 @@ genbin:
 	mkdir -p devbin
 
 build: genproto genbin
-	go build -pgo=auto -o devbin/yagpcc $(LDFLAGS) ./cmd/server
+	go build -pgo=auto -o devbin/yagpcc $(GOFLAGS) ./cmd/server
 
 ####################### TESTS #######################
 
@@ -32,3 +32,8 @@ fmt:
 
 lint:
 	golangci-lint run --timeout=10m
+
+version = $(shell git describe --tags --abbrev=0)
+package:
+	sed -i 's/YAGPCC_VERSION/${version}/g' debian/changelog
+	dpkg-buildpackage -us -uc
