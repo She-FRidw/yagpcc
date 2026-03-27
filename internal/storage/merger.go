@@ -166,8 +166,8 @@ func AggregateQueryStat(resultQ *pbm.TotalQueryData, qKey QueryKey, rQ *RunningQ
 			resultQ.QueryStat.Hostname = GetHostnameForSegindex(keyS.SKey.Segindex)
 			resultQ.QueryStat.QueryStatus = pbc.QueryStatus(valS.CurrentStatus)
 			if resultQ.QueryStat.QueryInfo != nil {
-				resultQ.QueryStat.StartTime = resultQ.QueryStat.QueryInfo.StartTime
-				resultQ.QueryStat.EndTime = resultQ.QueryStat.QueryInfo.EndTime
+				resultQ.QueryStat.StartTime = chooseTimestampMin(resultQ.QueryStat.StartTime, resultQ.QueryStat.QueryInfo.StartTime)
+				resultQ.QueryStat.EndTime = chooseTimestampMax(resultQ.QueryStat.EndTime, resultQ.QueryStat.QueryInfo.EndTime)
 			}
 		}
 		if resultQ.QueryStat.Message == "" && valS.QueryMessage != "" {

@@ -217,14 +217,27 @@ func GroupGPMetrics(dest *pbc.GPMetrics, source *pbc.GPMetrics, aggKind Aggregat
 	return nil
 }
 
-func chooseTimestamp(dest *timestamppb.Timestamp, source *timestamppb.Timestamp) *timestamppb.Timestamp {
-	if source == nil {
+func chooseTimestampMax(dest *timestamppb.Timestamp, source *timestamppb.Timestamp) *timestamppb.Timestamp {
+	if !source.IsValid() {
 		return dest
 	}
-	if dest == nil {
+	if !dest.IsValid() {
 		return source
 	}
 	if source.Seconds > dest.Seconds {
+		return source
+	}
+	return dest
+}
+
+func chooseTimestampMin(dest *timestamppb.Timestamp, source *timestamppb.Timestamp) *timestamppb.Timestamp {
+	if !source.IsValid() {
+		return dest
+	}
+	if !dest.IsValid() {
+		return source
+	}
+	if source.Seconds < dest.Seconds {
 		return source
 	}
 	return dest
@@ -246,9 +259,9 @@ func MergeQueryInfo(dest *pbc.QueryInfo, source *pbc.QueryInfo) error {
 	dest.DatabaseName = max(dest.DatabaseName, source.DatabaseName)
 	dest.Rsgname = max(dest.Rsgname, source.Rsgname)
 	dest.AnalyzeText = max(dest.AnalyzeText, source.AnalyzeText)
-	dest.SubmitTime = chooseTimestamp(dest.SubmitTime, source.SubmitTime)
-	dest.StartTime = chooseTimestamp(dest.StartTime, source.StartTime)
-	dest.EndTime = chooseTimestamp(dest.EndTime, source.EndTime)
+	dest.SubmitTime = chooseTimestampMin(dest.SubmitTime, source.SubmitTime)
+	dest.StartTime = chooseTimestampMin(dest.StartTime, source.StartTime)
+	dest.EndTime = chooseTimestampMax(dest.EndTime, source.EndTime)
 	return nil
 }
 
