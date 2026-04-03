@@ -8,9 +8,22 @@ import (
 	"time"
 
 	"github.com/open-gpdb/yagpcc/internal/app"
+	"github.com/spf13/pflag"
+)
+
+const (
+	flagNameConfigPath = "config-path"
+)
+
+var (
+	configPathValue *string
 )
 
 const configFile string = "yagpcc.yaml"
+
+func registerConfigPathFlag(set *pflag.FlagSet) {
+	configPathValue = set.String(flagNameConfigPath, "", "Path where to look for configuration files")
+}
 
 func main() {
 	ctxC, ctxCancelF := context.WithCancel(context.Background())
@@ -26,8 +39,11 @@ func main() {
 		}
 	}()
 
+	registerConfigPathFlag(pflag.CommandLine)
+	pflag.Parse()
+
 	for {
-		err := app.Run(ctxC, configFile)
+		err := app.Run(ctxC, fmt.Sprintf("%s/%s", *configPathValue, configFile))
 		if err != nil {
 			fmt.Println(err)
 		}
