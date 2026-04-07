@@ -125,6 +125,97 @@ func TestSort(t *testing.T) {
 	assert.Equal(t, sessState[2].LastMetrics.SystemStat.RunningTimeSeconds, float64(1))
 }
 
+func TestSortAggregatedSessionStats(t *testing.T) {
+	// Three sessions: distinct aggregate stats; one with nil AggregatedMetrics (treated as zeros).
+	makeSessions := func() []*pbc.SessionState {
+		return []*pbc.SessionState{
+			{
+				SessionKey: &pbc.SessionKey{SessId: 1},
+				AggregatedMetrics: &pbc.AggregatedMetrics{
+					Calls: 1, MinTime: 10, MaxTime: 50, MeanTime: 30, StddevTime: 5, TotalTime: 100,
+				},
+			},
+			{
+				SessionKey: &pbc.SessionKey{SessId: 2},
+				AggregatedMetrics: &pbc.AggregatedMetrics{
+					Calls: 5, MinTime: 1, MaxTime: 200, MeanTime: 100, StddevTime: 20, TotalTime: 500,
+				},
+			},
+			{
+				SessionKey:        &pbc.SessionKey{SessId: 3},
+				AggregatedMetrics: nil,
+			},
+		}
+	}
+
+	t.Run("by aggregated total_time desc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_TOTAL_TIME, Order: pbm.SortOrder_SORT_DESC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		require.Equal(t, int64(2), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(3), sessions[2].SessionKey.SessId)
+	})
+
+	t.Run("by aggregated calls asc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_CALLS, Order: pbm.SortOrder_SORT_ASC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		require.Equal(t, int64(3), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(2), sessions[2].SessionKey.SessId)
+	})
+
+	t.Run("by aggregated max_time desc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_MAX_TIME, Order: pbm.SortOrder_SORT_DESC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		require.Equal(t, int64(2), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(3), sessions[2].SessionKey.SessId)
+	})
+
+	t.Run("by aggregated min_time asc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_MIN_TIME, Order: pbm.SortOrder_SORT_ASC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		// nil AggregatedMetrics sorts as 0 for min_time, so session 3 is first.
+		require.Equal(t, int64(3), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(2), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[2].SessionKey.SessId)
+	})
+
+	t.Run("by aggregated mean_time desc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_MEAN_TIME, Order: pbm.SortOrder_SORT_DESC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		require.Equal(t, int64(2), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(3), sessions[2].SessionKey.SessId)
+	})
+
+	t.Run("by aggregated stddev_time desc", func(t *testing.T) {
+		sessions := makeSessions()
+		fields := []*pbm.SessionFieldWrapper{
+			{FieldName: pbm.SessionField_SESSION_FIELD_AGGREGATED_STDDEV_TIME, Order: pbm.SortOrder_SORT_DESC},
+		}
+		require.NoError(t, grpc.SortResult(&sessions, fields))
+		require.Equal(t, int64(2), sessions[0].SessionKey.SessId)
+		require.Equal(t, int64(1), sessions[1].SessionKey.SessId)
+		require.Equal(t, int64(3), sessions[2].SessionKey.SessId)
+	})
+}
+
 func TestFilterOut(t *testing.T) {
 	sessionState := &pbc.SessionState{
 		SessionKey: &pbc.SessionKey{SessId: 1},
@@ -247,8 +338,11 @@ func TestMasterMethods(t *testing.T) {
 	clientSet, cleanup := setupGRPCClientSet(t, sessionMocker)
 	defer cleanup()
 
+	var aggQueryResult *pbm.TotalQueryData
+
 	t.Run("setup", func(t *testing.T) {
 		startQuery := timestamppb.New(time.Now().Add(time.Duration(-1) * time.Hour))
+		addTopLevel := &pbc.AdditionalQueryInfo{NestedLevel: 0}
 		for _, request := range []*pb.SetQueryReq{
 			{
 				QueryStatus: pbc.QueryStatus_QUERY_STATUS_END,
@@ -256,6 +350,7 @@ func TestMasterMethods(t *testing.T) {
 				QueryKey:    &pbc.QueryKey{Ssid: 1},
 				SegmentKey:  &pbc.SegmentKey{Segindex: -1},
 				QueryInfo:   &pbc.QueryInfo{UserName: "test", DatabaseName: "test"},
+				AddInfo:     addTopLevel,
 				QueryMetrics: &pbc.GPMetrics{
 					Instrumentation: &pbc.MetricInstrumentation{
 						Ntuples:      1,
@@ -268,6 +363,7 @@ func TestMasterMethods(t *testing.T) {
 				Datetime:    startQuery,
 				QueryKey:    &pbc.QueryKey{Ssid: 1},
 				SegmentKey:  &pbc.SegmentKey{Segindex: -1},
+				AddInfo:     addTopLevel,
 			},
 			{
 				QueryStatus:  pbc.QueryStatus_QUERY_STATUS_END,
@@ -304,8 +400,10 @@ func TestMasterMethods(t *testing.T) {
 	qKey := storage.QueryKey{Ssid: 1}
 	qVal, ok := clientSet.backgroundStorage.RQStorage.GetQuery(qKey)
 	require.True(t, ok)
-	_, err := clientSet.backgroundStorage.AggtregateDataToQueryAndSession(qKey, qVal)
+	var err error
+	aggQueryResult, err = clientSet.backgroundStorage.AggtregateDataToQueryAndSession(qKey, qVal)
 	require.NoError(t, err)
+	require.NotNil(t, aggQueryResult)
 
 	// now we could query session data
 	t.Run("get gp session by id", func(t *testing.T) {
@@ -324,6 +422,17 @@ func TestMasterMethods(t *testing.T) {
 			},
 		}
 		utils.AssertProtoMessagesEqual(t, expectedTotalMetrics, response.SessionsState.TotalMetrics)
+
+		require.NotNil(t, response.SessionsState.AggregatedMetrics, "GetGPSession must return short-query aggregate stats on SessionState")
+		start := utils.GetTimeForTimestamp(aggQueryResult.QueryStat.StartTime)
+		end := utils.GetTimeForTimestamp(aggQueryResult.QueryStat.EndTime)
+		dur := end.Sub(start)
+		if dur < 0 {
+			dur = 0
+		}
+		expectedAgg := &pbc.AggregatedMetrics{}
+		require.NoError(t, storage.GroupAggMetrics(expectedAgg, dur))
+		utils.AssertProtoMessagesEqual(t, expectedAgg, response.SessionsState.AggregatedMetrics)
 	})
 
 	t.Run("get gp session with parameters", func(t *testing.T) {
@@ -353,6 +462,17 @@ func TestMasterMethods(t *testing.T) {
 		assert.Equal(t, 1, len(response.SessionsState))
 		assert.Equal(t, "test", response.SessionsState[0].SessionInfo.User)
 		assert.Equal(t, "test2", response.SessionsState[0].SessionInfo.Database)
+
+		require.NotNil(t, response.SessionsState[0].AggregatedMetrics, "GetGPSessions must include aggregated_metrics on SessionState")
+		start := utils.GetTimeForTimestamp(aggQueryResult.QueryStat.StartTime)
+		end := utils.GetTimeForTimestamp(aggQueryResult.QueryStat.EndTime)
+		dur := end.Sub(start)
+		if dur < 0 {
+			dur = 0
+		}
+		expectedAgg := &pbc.AggregatedMetrics{}
+		require.NoError(t, storage.GroupAggMetrics(expectedAgg, dur))
+		utils.AssertProtoMessagesEqual(t, expectedAgg, response.SessionsState[0].AggregatedMetrics)
 
 		// now lets get session with next token - should return empty response
 		request.PageToken = "2"

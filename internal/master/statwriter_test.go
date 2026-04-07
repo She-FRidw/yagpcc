@@ -76,6 +76,20 @@ func jsonMustUnmarshal[T any](t *testing.T, data []byte) T {
 	return result
 }
 
+// firstJSONObjectLine returns the first non-empty line from StoreSerializableData output
+// (multiple flushes may append several JSONL lines).
+func firstJSONObjectLine(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			return line
+		}
+	}
+	require.FailNow(t, "expected non-empty JSON line from writer")
+	return nil
+}
+
 func TestSerializableObject(t *testing.T) {
 	chanOut := make(chan int, 1)
 	mockWriter := mockWriterCh{ChanOut: chanOut}
@@ -132,7 +146,10 @@ func TestWriteSession(t *testing.T) {
 			DatID:    1,
 			Datname:  "db1",
 			Pid:      1,
-			UsesysID: 10},
+			UsesysID: 10,
+			WaitEvent:     utils.P("LWLockNamed"),
+			WaitEventType: utils.P("Lock"),
+		},
 		RunningQuery: &storage.QueryKeyWrite{
 			Ssid: 123,
 			Tmid: 12345,
@@ -165,6 +182,14 @@ from mytable`,
 				Interconnect: &pbc.InterconnectStat{Retransmits: 15},
 			},
 		},
+		AggregatedMetrics: &pbc.AggregatedMetrics{
+			Calls:      7,
+			MinTime:    100,
+			MaxTime:    500,
+			MeanTime:   300,
+			StddevTime: 50,
+			TotalTime:  2100,
+		},
 		RunningQuerySlices: 10,
 	}
 
@@ -181,8 +206,18 @@ from mytable`,
 			"TmID":     float64(12345),
 			"Usename":  "User1",
 			"UsesysID": float64(10),
+			"WaitEvent":     "LWLockNamed",
+			"WaitEventType": "Lock",
 		},
 		"Hostname": "",
+		"AggregatedMetrics": map[string]any{
+			"calls":       float64(7),
+			"min_time":    float64(100),
+			"max_time":    float64(500),
+			"mean_time":   float64(300),
+			"stddev_time": float64(50),
+			"total_time":  float64(2100),
+		},
 		"LongRunningGPMetrics": map[string]any{
 			"instrumentation": map[string]any{
 				"ntuples": float64(2),
@@ -231,9 +266,59 @@ from mytable`,
 			},
 		},
 	}
-	actualLastWrite := jsonMustUnmarshal[map[string]any](t, mockWriter.LastWrite())
+	actualLastWrite := jsonMustUnmarshal[map[string]any](t, firstJSONObjectLine(t, mockWriter.LastWrite()))
 
 	assert.Equal(t, expectedLastWrite, actualLastWrite)
+}
+
+func TestWriteSessionAggregatedMetricsWrittenToFile(t *testing.T) {
+	mockWriter := newMockWriter()
+	ctx, cFunc := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cFunc()
+
+	file, err := os.CreateTemp(t.TempDir(), "trace.log")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	zLogger := utils.DualLog(true, file)
+
+	gp.DiscoveredTmID = 12345
+	sessChan := make(chan *gp.SessionDataWrite, 1)
+	currTime := time.Now().Truncate(time.Minute)
+
+	sessChan <- &gp.SessionDataWrite{
+		CollectTime: gp.UTCTime(currTime),
+		ClusterID:   "aggtest",
+		GpStatInfo: &gp.GpStatActivity{
+			SessID: 1, TmID: 12345, Usename: "u", DatID: 1, Datname: "d", Pid: 1, UsesysID: 1,
+		},
+		RunningQuery: &storage.QueryKeyWrite{Ssid: 1, Tmid: 12345, Ccnt: 1},
+		RunningQueryInfo: &gp.QueryInfoShort{
+			QueryID: 1, PlanID: 1, QueryText: "select 1",
+		},
+		TotalGPMetrics:       &pbc.GPMetrics{},
+		LongRunningGPMetrics: &pbc.GPMetrics{},
+		QueryGPMetrics:       &pbc.GPMetrics{},
+		AggregatedMetrics: &pbc.AggregatedMetrics{
+			Calls:      3,
+			MinTime:    1e6,
+			MaxTime:    4e6,
+			MeanTime:   2e6,
+			StddevTime: 0.5e6,
+			TotalTime:  6e6,
+		},
+	}
+
+	master.StoreSessions(ctx, zLogger, sessChan, mockWriter)
+
+	row := jsonMustUnmarshal[map[string]any](t, firstJSONObjectLine(t, mockWriter.LastWrite()))
+	am, ok := row["AggregatedMetrics"].(map[string]any)
+	require.True(t, ok, "session JSON line must include AggregatedMetrics object")
+	assert.InDelta(t, float64(3), am["calls"], 0)
+	assert.InDelta(t, 1e6, am["min_time"], 0)
+	assert.InDelta(t, 4e6, am["max_time"], 0)
+	assert.InDelta(t, 2e6, am["mean_time"], 0)
+	assert.InDelta(t, 0.5e6, am["stddev_time"], 0)
+	assert.InDelta(t, 6e6, am["total_time"], 0)
 }
 
 func TestWriteQuery(t *testing.T) {
@@ -385,7 +470,7 @@ from my_table`,
 		"waitMode": "",
 	}
 
-	actualLastWrite := jsonMustUnmarshal[map[string]any](t, mockWriter.LastWrite())
+	actualLastWrite := jsonMustUnmarshal[map[string]any](t, firstJSONObjectLine(t, mockWriter.LastWrite()))
 	assert.Equal(t, expectedLastWrite, actualLastWrite)
 }
 
