@@ -1,7 +1,15 @@
 GIT_REVISION=`git rev-parse --short HEAD`
 YAGPCC_VERSION=`git describe --tags --abbrev=0`
 GOFMT_FILES?=$$(find . -name '*.go' | grep -v .git | grep -v parser | grep -v vendor)
-GOFLAGS=-ldflags=-extldflags=-Wl,-ld_classic
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+	GOFLAGS := -ldflags=-extldflags=-Wl,-ld_classic
+else
+	GOFLAGS :=
+endif
+
 GINKGO_CLI=github.com/onsi/ginkgo/v2/ginkgo@v2.28.0
 
 ####################### BUILD #######################

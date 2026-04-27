@@ -116,8 +116,12 @@ func NewLister(log log, db db, opts ...Option) *Lister {
 	return l
 }
 
-func (l *Lister) SetCloudberrySessionLister(ctx context.Context) error {
+func (l *Lister) SetModernSessionLister(ctx context.Context) error {
 	return l.setCustomSessionLister(ctx, cloudberrySessionsQuery())
+}
+
+func (l *Lister) SetCloudberrySessionLister(ctx context.Context) error {
+	return l.SetModernSessionLister(ctx)
 }
 
 func (l *Lister) SetGP6SessionLister(ctx context.Context) error {
