@@ -496,13 +496,13 @@ func Run(ctx context.Context, configFile string) error {
 			logger.Fatal(err.Error())
 			return err
 		}
-		modernStatActivity, err := gp.IsCloudberryOrGP7(ctx)
+		modernStatActivity, err := gp.UsesModernStatActivity(ctx)
 		if err != nil {
 			logger.Fatal(err.Error())
 			return err
 		}
 		if modernStatActivity {
-			err = statActivityLister.SetCloudberrySessionLister(ctx)
+			err = statActivityLister.SetModernSessionLister(ctx)
 			if err != nil {
 				logger.Fatal(err.Error())
 				return err
