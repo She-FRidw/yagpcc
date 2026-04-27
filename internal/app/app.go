@@ -496,12 +496,12 @@ func Run(ctx context.Context, configFile string) error {
 			logger.Fatal(err.Error())
 			return err
 		}
-		cloudberry, err := gp.IsCloudberry(ctx)
+		modernStatActivity, err := gp.IsCloudberryOrGP7(ctx)
 		if err != nil {
 			logger.Fatal(err.Error())
 			return err
 		}
-		if cloudberry {
+		if modernStatActivity {
 			err = statActivityLister.SetCloudberrySessionLister(ctx)
 			if err != nil {
 				logger.Fatal(err.Error())
