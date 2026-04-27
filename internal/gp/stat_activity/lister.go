@@ -22,6 +22,105 @@ const (
 	metricsLabelStatus    = "status"
 )
 
+const (
+	gp6SessionsQuery = `
+			SELECT
+				datid,
+				datname,
+				pid,
+				sess_id AS SessID,
+				cast(extract(epoch from pg_postmaster_start_time()) AS bigint) AS TmID,
+				usesysid,
+				usename,
+				application_name AS ApplicationName,
+				client_addr AS ClientAddr,
+				client_hostname AS ClientHostname,
+				client_port AS ClientPort,
+				backend_start AS BackendStart,
+				xact_start AS XactStart,
+				query_start AS QueryStart,
+				state_change AS StateChange,
+				waiting,
+				state,
+				backend_xid AS BackendXid,
+				backend_xmin AS backendXmin,
+				query,
+				waiting_reason AS WaitingReason,
+				rsgid,
+				rsgname,
+				rsgqueueduration,
+				'' as WaitEvent,
+                '' AS WaitEventType 
+			FROM pg_stat_activity
+		`
+
+	gp6AllSessionsQuery = `
+select
+  pg_catalog.gp_execution_segment() as GpSegmentId,
+  pid,
+  sess_id as SessId,
+  '' as BackendType
+from
+  gp_dist_random('pg_stat_activity')
+union all
+select
+  pg_catalog.gp_execution_segment() as GpSegmentId,
+  pid,
+  sess_id as SessId,
+  '' as BackendType
+from
+  pg_stat_activity;
+		`
+
+	cloudberrySessionsQuery = `
+                        SELECT
+                                COALESCE(datid, 0) as datid,
+                                COALESCE(datname, 'system') as datname,
+                                pid,
+                                sess_id AS SessID,
+                                cast(extract(epoch from pg_postmaster_start_time()) AS bigint) AS TmID,
+                                COALESCE(usesysid, 0) as usesysid,
+                                COALESCE(usename, 'system') as usename,
+                                application_name AS ApplicationName,
+                                client_addr AS ClientAddr,
+                                client_hostname AS ClientHostname,
+                                client_port AS ClientPort,
+                                backend_start AS BackendStart,
+                                xact_start AS XactStart,
+                                query_start AS QueryStart,
+                                state_change AS StateChange,
+                                false as waiting,
+                                state,
+                                backend_xid AS BackendXid,
+                                backend_xmin AS backendXmin,
+                                query,
+                                '' as WaitingReason,
+                                rsgid,
+                                rsgname,
+                                0 as rsgqueueduration,
+                                wait_event as WaitEvent,
+                                wait_event_type AS WaitEventType
+                        FROM pg_stat_activity
+		`
+	cloudberryAllSessionsQuery = `
+select
+  pg_catalog.gp_execution_segment() as GpSegmentId,
+  pid,
+  sess_id as SessId,
+  backend_type as BackendType
+from
+  gp_dist_random('pg_stat_activity')
+union all
+select
+  pg_catalog.gp_execution_segment() as GpSegmentId,
+  pid,
+  sess_id as SessId,
+  backend_type as BackendType
+from
+  pg_stat_activity;
+		`
+)
+
 func (l *Lister) List(context.Context) ([]*gp.GpStatActivity, error) {
 	l.mx.Lock()
 	defer l.mx.Unlock()
@@ -44,6 +143,22 @@ func (l *Lister) List(context.Context) ([]*gp.GpStatActivity, error) {
 	return l.leftJoin(sessions, locks), nil
 }
 
+func (l *Lister) ListAllSessions(context.Context) ([]SessionPid, error) {
+	l.mx.Lock()
+	defer l.mx.Unlock()
+
+	if l.backgroundCtx == nil {
+		return nil, fmt.Errorf("background collection was not started")
+	}
+
+	sessions, err := l.allSessions.readStale()
+	if err != nil {
+		return nil, fmt.Errorf("error reading all sessions: %w", err)
+	}
+
+	return sessions, nil
+}
+
 func (l *Lister) Start(ctx context.Context) error {
 	l.mx.Lock()
 	defer l.mx.Unlock()
@@ -63,9 +178,14 @@ func (l *Lister) Start(ctx context.Context) error {
 		return fmt.Errorf("error initializing locks cache: %w", err)
 	}
 
+	if err := l.allSessions.collectOnce(ctx); err != nil {
+		return fmt.Errorf("error initializing all sessions cache: %w", err)
+	}
+
 	l.backgroundCtx, l.backgroundCancel = context.WithCancel(context.Background())
 	go l.backgroundSessions.collectBackground(l.backgroundCtx)
 	go l.backgroundLocks.collectBackground(l.backgroundCtx)
+	go l.allSessions.collectBackground(l.backgroundCtx)
 
 	return nil
 }
@@ -106,6 +226,7 @@ func NewLister(log log, db db, opts ...Option) *Lister {
 		backgroundCancel:      nil,
 		backgroundSessions:    newBackgroundSessions(log, db, makeOperationLatencyHandler),
 		backgroundLocks:       newBackgroundLocks(log, db, makeOperationLatencyHandler),
+		allSessions:           newBackgroundAllSessions(log, db, makeOperationLatencyHandler),
 		metricsLatencyHandler: metricsLatencyHandler,
 	}
 
@@ -117,7 +238,7 @@ func NewLister(log log, db db, opts ...Option) *Lister {
 }
 
 func (l *Lister) SetModernSessionLister(ctx context.Context) error {
-	return l.setCustomSessionLister(ctx, cloudberrySessionsQuery())
+	return l.setCustomSessionLister(ctx, cloudberrySessionsQuery, cloudberryAllSessionsQuery)
 }
 
 func (l *Lister) SetCloudberrySessionLister(ctx context.Context) error {
@@ -125,7 +246,7 @@ func (l *Lister) SetCloudberrySessionLister(ctx context.Context) error {
 }
 
 func (l *Lister) SetGP6SessionLister(ctx context.Context) error {
-	return l.setCustomSessionLister(ctx, gp6SessionsQuery())
+	return l.setCustomSessionLister(ctx, gp6SessionsQuery, gp6AllSessionsQuery)
 }
 
 func getMetricsLatencyHandler() *prometheus.HistogramVec {
@@ -163,7 +284,7 @@ func getMetricsLatencyHandler() *prometheus.HistogramVec {
 	return savedMetricsLatencyHandler
 }
 
-func (l *Lister) setCustomSessionLister(ctx context.Context, query string) error {
+func (l *Lister) setCustomSessionLister(ctx context.Context, masterQuery string, allSessionsQuery string) error {
 	needStart := false
 	if l.backgroundCtx != nil {
 		// need stop and start again
@@ -172,7 +293,8 @@ func (l *Lister) setCustomSessionLister(ctx context.Context, query string) error
 
 	}
 	l.mx.Lock()
-	WithCustomBackgroundSessionsQuery(query)(l)
+	WithCustomBackgroundSessionsQuery(masterQuery)(l)
+	WithCustomAllSessionsQuery(allSessionsQuery)(l)
 	l.mx.Unlock()
 
 	if needStart {
@@ -207,9 +329,27 @@ func WithBackgroundLocksCacheTTL(ttl time.Duration) Option {
 	}
 }
 
+func WithBackgroundAllSessionsCollectionInterval(interval time.Duration) Option {
+	return func(l *Lister) {
+		l.allSessions.collectionInterval = interval
+	}
+}
+
+func WithBackgroundAllSessionsCacheTTL(ttl time.Duration) Option {
+	return func(l *Lister) {
+		l.allSessions.cacheTTL = ttl
+	}
+}
+
 func WithCustomBackgroundSessionsQuery(query string) Option {
 	return func(l *Lister) {
 		l.backgroundSessions.query = query
+	}
+}
+
+func WithCustomAllSessionsQuery(query string) Option {
+	return func(l *Lister) {
+		l.allSessions.query = query
 	}
 }
 
@@ -220,74 +360,9 @@ type Lister struct {
 	backgroundCtx         context.Context
 	backgroundCancel      context.CancelFunc
 	backgroundSessions    *background[Session]
+	allSessions           *background[SessionPid]
 	backgroundLocks       *background[SessionLock]
 	metricsLatencyHandler *prometheus.HistogramVec
-}
-
-func gp6SessionsQuery() string {
-	return `
-			SELECT
-				datid,
-				datname,
-				pid,
-				sess_id AS SessID,
-				cast(extract(epoch from pg_postmaster_start_time()) AS bigint) AS TmID,
-				usesysid,
-				usename,
-				application_name AS ApplicationName,
-				client_addr AS ClientAddr,
-				client_hostname AS ClientHostname,
-				client_port AS ClientPort,
-				backend_start AS BackendStart,
-				xact_start AS XactStart,
-				query_start AS QueryStart,
-				state_change AS StateChange,
-				waiting,
-				state,
-				backend_xid AS BackendXid,
-				backend_xmin AS backendXmin,
-				query,
-				waiting_reason AS WaitingReason,
-				rsgid,
-				rsgname,
-				rsgqueueduration,
-				'' as WaitEvent,
-                '' AS WaitEventType 
-			FROM pg_stat_activity
-		`
-}
-
-func cloudberrySessionsQuery() string {
-	return `
-                        SELECT
-                                COALESCE(datid, 0) as datid,
-                                COALESCE(datname, 'system') as datname,
-                                pid,
-                                sess_id AS SessID,
-                                cast(extract(epoch from pg_postmaster_start_time()) AS bigint) AS TmID,
-                                COALESCE(usesysid, 0) as usesysid,
-                                COALESCE(usename, 'system') as usename,
-                                application_name AS ApplicationName,
-                                client_addr AS ClientAddr,
-                                client_hostname AS ClientHostname,
-                                client_port AS ClientPort,
-                                backend_start AS BackendStart,
-                                xact_start AS XactStart,
-                                query_start AS QueryStart,
-                                state_change AS StateChange,
-                                false as waiting,
-                                state,
-                                backend_xid AS BackendXid,
-                                backend_xmin AS backendXmin,
-                                query,
-                                '' as WaitingReason,
-                                rsgid,
-                                rsgname,
-                                0 as rsgqueueduration,
-                                wait_event as WaitEvent,
-                                wait_event_type AS WaitEventType
-                        FROM pg_stat_activity
-		`
 }
 
 func newBackgroundSessions(log log, db db, makeOperationLatencyHandler func(string) latencyHandler) *background[Session] {
@@ -302,7 +377,32 @@ func newBackgroundSessions(log log, db db, makeOperationLatencyHandler func(stri
 
 	return &background[Session]{
 		log:                      log,
-		query:                    gp6SessionsQuery(),
+		query:                    gp6SessionsQuery,
+		db:                       db,
+		staleReadLatencyHandler:  makeOperationLatencyHandler(operationStaleRead),
+		collectionTimeout:        defaultCollectionTimeout,
+		collectionLatencyHandler: makeOperationLatencyHandler(operationCollect),
+		collectionInterval:       defaultCollectionInterval,
+		cacheMX:                  &sync.Mutex{},
+		cache:                    nil,
+		cachedAt:                 time.Time{},
+		cacheTTL:                 defaultCacheTTL,
+	}
+}
+
+func newBackgroundAllSessions(log log, db db, makeOperationLatencyHandler func(string) latencyHandler) *background[SessionPid] {
+	const (
+		operationCollect   = "background_collection_all_sessions"
+		operationStaleRead = "stale_read_all_sessions"
+
+		defaultCollectionInterval = 60 * time.Second
+		defaultCollectionTimeout  = 300 * time.Second
+		defaultCacheTTL           = 600 * time.Second
+	)
+
+	return &background[SessionPid]{
+		log:                      log,
+		query:                    gp6AllSessionsQuery,
 		db:                       db,
 		staleReadLatencyHandler:  makeOperationLatencyHandler(operationStaleRead),
 		collectionTimeout:        defaultCollectionTimeout,
